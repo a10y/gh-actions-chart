@@ -176,13 +176,57 @@ let allRuns = [];   // normalized run objects
 let workflows = []; // preflighted workflow list
 let chart = null;
 
-// ---- persistence ----
-els.repo.value = localStorage.getItem('gac_repo') || '';
+// ---- URL state (shareable links) + persistence ----
+function readParams() {
+  let qs = location.search.replace(/^\?/, '');
+  if (!qs && location.hash) qs = location.hash.replace(/^#\??/, '');
+  const p = new URLSearchParams(qs);
+  return {
+    repo: p.get('repo'),
+    max: p.get('max'),
+    check: p.get('check'),
+    branch: p.get('branch'),
+    event: p.get('event'),
+    conclusion: p.get('conclusion'),
+  };
+}
+
+function writeParams() {
+  const p = new URLSearchParams();
+  const repo = els.repo.value.trim();
+  if (repo) p.set('repo', repo);
+  if (els.maxRuns.value) p.set('max', els.maxRuns.value);
+  const wf = els.wfSelect.value ? workflows.find(w => String(w.id) === els.wfSelect.value) : null;
+  if (wf) p.set('check', wf.name);
+  if (els.fBranch.value) p.set('branch', els.fBranch.value);
+  if (els.fEvent.value) p.set('event', els.fEvent.value);
+  if (els.fStatus.value) p.set('conclusion', els.fStatus.value);
+  // The PAT is intentionally never written to the URL.
+  const qs = p.toString();
+  try {
+    history.replaceState(null, '', qs ? `?${qs}` : location.pathname);
+  } catch (_) {
+    // file:// has an opaque origin; replaceState with a query is blocked → use the hash.
+    location.hash = qs ? `?${qs}` : '';
+  }
+}
+
+function applyFilterParams(s) {
+  if (!s) return;
+  if (s.branch && [...els.fBranch.options].some(o => o.value === s.branch)) els.fBranch.value = s.branch;
+  if (s.event && [...els.fEvent.options].some(o => o.value === s.event)) els.fEvent.value = s.event;
+  if (s.conclusion) els.fStatus.value = s.conclusion;
+}
+
+let pendingState = readParams();
+
+els.repo.value = pendingState.repo || localStorage.getItem('gac_repo') || '';
 els.pat.value = localStorage.getItem('gac_pat') || '';
-els.maxRuns.value = localStorage.getItem('gac_max') || '300';
-els.repo.addEventListener('change', () => localStorage.setItem('gac_repo', els.repo.value.trim()));
+els.maxRuns.value = pendingState.max || localStorage.getItem('gac_max') || '300';
+
+els.repo.addEventListener('change', () => { localStorage.setItem('gac_repo', els.repo.value.trim()); writeParams(); });
 els.pat.addEventListener('change', () => localStorage.setItem('gac_pat', els.pat.value.trim()));
-els.maxRuns.addEventListener('change', () => localStorage.setItem('gac_max', els.maxRuns.value));
+els.maxRuns.addEventListener('change', () => { localStorage.setItem('gac_max', els.maxRuns.value); writeParams(); });
 
 function setStatus(msg, kind) {
   els.status.textContent = msg;
@@ -329,6 +373,8 @@ async function fetchRuns() {
   }
   setStatus(`Loaded ${allRuns.length} runs of “${wfLabel}”${range}.`, 'ok');
   populateFilters();
+  applyFilterParams(pendingState);
+  pendingState = null;
   render();
 }
 
@@ -459,6 +505,8 @@ function render() {
       : `Showing ${rows.length} of ${total} loaded runs (filters active).`,
       rows.length === 0 ? 'error' : '');
   }
+
+  writeParams();
 }
 
 // Find the bar nearest the click/hover, even when clicking the axis/empty column.
@@ -487,6 +535,17 @@ els.fetchBtn.addEventListener('click', fetchRuns);
 els.wfSelect.addEventListener('change', () => { if (els.wfSelect.value !== undefined) fetchRuns(); });
 [els.fBranch, els.fEvent, els.fStatus].forEach(s => s.addEventListener('change', render));
 els.repo.addEventListener('keydown', e => { if (e.key === 'Enter') loadWorkflows(); });
+
+// ---- auto-load from a shared link ----
+if (pendingState && pendingState.repo) {
+  loadWorkflows().then(() => {
+    if (pendingState && pendingState.check) {
+      const wf = workflows.find(w => w.name === pendingState.check);
+      if (wf) { els.wfSelect.value = String(wf.id); fetchRuns(); }
+      else setStatus(`Check “${pendingState.check}” from the link wasn’t found in this repo.`, 'error');
+    }
+  });
+}
 </script>
 </body>
 </html>
