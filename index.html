@@ -61,6 +61,9 @@
   #status { margin: 10px 0; font-size: 13px; min-height: 18px; }
   #status.error { color: var(--failure); }
   #status.ok { color: var(--success); }
+  .urlerror { display: none; margin: 10px 0; padding: 10px 12px; border: 1px solid var(--failure); background: #ffebe9; border-radius: 6px; color: #82071e; font-size: 13px; }
+  .urlerror strong { display: block; margin-bottom: 4px; }
+  .urlerror ul { margin: 4px 0 0; padding-left: 18px; }
   .chart-wrap { position: relative; height: 460px; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
   a { color: var(--accent); }
@@ -126,6 +129,7 @@
   </div>
 
   <div id="status"></div>
+  <div id="urlError" class="urlerror"></div>
 
   <div class="legend">
     <span><span class="swatch" style="background:var(--queue)"></span>Queue time</span>
@@ -170,11 +174,13 @@ const els = {
   fEvent: document.getElementById('fEvent'),
   fStatus: document.getElementById('fStatus'),
   status: document.getElementById('status'),
+  urlError: document.getElementById('urlError'),
 };
 
 let allRuns = [];   // normalized run objects
 let workflows = []; // preflighted workflow list
 let chart = null;
+let suppressWrite = false; // pause URL writes while restoring from a shared link
 
 // ---- URL state (shareable links) + persistence ----
 function readParams() {
@@ -192,6 +198,7 @@ function readParams() {
 }
 
 function writeParams() {
+  if (suppressWrite) return;
   const p = new URLSearchParams();
   const repo = els.repo.value.trim();
   if (repo) p.set('repo', repo);
@@ -211,25 +218,40 @@ function writeParams() {
   }
 }
 
-// Ensure a select can hold `val` even if it's not among the loaded runs, so a
-// shared link's filter is faithfully restored (and not silently dropped).
-function ensureOption(sel, val) {
-  if (!val) return;
-  if (![...sel.options].some(o => o.value === val)) {
-    const o = document.createElement('option');
-    o.value = val;
-    o.textContent = `${val} (not in loaded runs)`;
-    sel.appendChild(o);
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// Show (or clear) the box that explains which URL params couldn't be applied.
+function showUrlErrors(errors) {
+  const box = els.urlError;
+  if (errors && errors.length) {
+    box.innerHTML = '<strong>Couldn’t fully apply the shared link:</strong><ul>' +
+      errors.map(e => `<li>${esc(e)}</li>`).join('') + '</ul>';
+    box.style.display = 'block';
+  } else {
+    box.style.display = 'none';
+    box.innerHTML = '';
   }
 }
 
+// Apply branch/event/conclusion from the URL against the real, loaded options.
+// Returns a list of human-readable errors for any value that doesn't resolve.
 function applyFilterParams(s) {
-  if (!s) return;
-  ensureOption(els.fBranch, s.branch);
-  ensureOption(els.fEvent, s.event);
-  if (s.branch) els.fBranch.value = s.branch;
-  if (s.event) els.fEvent.value = s.event;
-  if (s.conclusion) els.fStatus.value = s.conclusion;
+  const errors = [];
+  if (s.branch) {
+    if ([...els.fBranch.options].some(o => o.value === s.branch)) els.fBranch.value = s.branch;
+    else errors.push(`Branch “${s.branch}” has no runs in the loaded set, so it can’t be selected.`);
+  }
+  if (s.event) {
+    if ([...els.fEvent.options].some(o => o.value === s.event)) els.fEvent.value = s.event;
+    else errors.push(`Trigger “${s.event}” has no runs in the loaded set, so it can’t be selected.`);
+  }
+  if (s.conclusion) {
+    if (['success', 'failure', 'other'].includes(s.conclusion)) els.fStatus.value = s.conclusion;
+    else errors.push(`Conclusion “${s.conclusion}” is not a valid value (use success, failure, or other).`);
+  }
+  return errors;
 }
 
 let pendingState = readParams();
@@ -293,11 +315,12 @@ async function ghError(res) {
 // ---- preflight: list the repo's checks/workflows ----
 async function loadWorkflows() {
   const repo = repoSlug();
-  if (!/^[^/]+\/[^/]+$/.test(repo)) { setStatus('Enter a repository as owner/repo.', 'error'); return; }
+  if (!/^[^/]+\/[^/]+$/.test(repo)) { setStatus('Enter a repository as owner/repo.', 'error'); return false; }
   localStorage.setItem('gac_repo', repo);
   localStorage.setItem('gac_pat', els.pat.value.trim());
 
   els.loadWfBtn.disabled = true;
+  showUrlErrors([]);
   setStatus('Loading checks…');
   try {
     workflows = [];
@@ -312,7 +335,7 @@ async function loadWorkflows() {
   } catch (e) {
     setStatus(e.message, 'error');
     els.loadWfBtn.disabled = false;
-    return;
+    return false;
   }
 
   workflows.sort((a, b) => a.name.localeCompare(b.name));
@@ -327,6 +350,7 @@ async function loadWorkflows() {
   els.fetchBtn.disabled = false;
   els.loadWfBtn.disabled = false;
   setStatus(`Found ${workflows.length} checks. Pick one and fetch its runs.`, 'ok');
+  return true;
 }
 
 // ---- fetch runs for the selected check ----
@@ -387,8 +411,6 @@ async function fetchRuns() {
   }
   setStatus(`Loaded ${allRuns.length} runs of “${wfLabel}”${range}.`, 'ok');
   populateFilters();
-  applyFilterParams(pendingState);
-  pendingState = null;
   render();
 }
 
@@ -550,16 +572,41 @@ els.wfSelect.addEventListener('change', () => { if (els.wfSelect.value !== undef
 [els.fBranch, els.fEvent, els.fStatus].forEach(s => s.addEventListener('change', render));
 els.repo.addEventListener('keydown', e => { if (e.key === 'Enter') loadWorkflows(); });
 
-// ---- auto-load from a shared link ----
-if (pendingState && pendingState.repo) {
-  loadWorkflows().then(() => {
-    if (pendingState && pendingState.check) {
-      const wf = workflows.find(w => w.name === pendingState.check);
-      if (wf) { els.wfSelect.value = String(wf.id); fetchRuns(); }
-      else setStatus(`Check “${pendingState.check}” from the link wasn’t found in this repo.`, 'error');
+// ---- restore from a shared link ----
+// Fetch the real check list first, then resolve the URL params against it.
+// Anything that doesn't resolve to a valid option is reported in the error box.
+async function restoreFromUrl() {
+  const s = pendingState;
+  pendingState = null;
+  if (!s || !s.repo) return;
+
+  suppressWrite = true; // don't rewrite the URL until everything is resolved
+  const errors = [];
+  try {
+    const ok = await loadWorkflows();
+    if (!ok) {
+      errors.push(`Couldn’t load the checks for “${s.repo}” (see the message above) — the shared link can’t be resolved. If it’s a private repo, add a PAT with access.`);
+      return;
     }
-  });
+    if (s.check) {
+      const wf = workflows.find(w => w.name === s.check);
+      if (!wf) {
+        errors.push(`Check “${s.check}” from the link doesn’t exist in this repo. Available: ${workflows.map(w => w.name).join(', ') || '(none)'}.`);
+        return;
+      }
+      els.wfSelect.value = String(wf.id);
+      await fetchRuns(); // populates branch/event options for this check
+      errors.push(...applyFilterParams(s));
+      render();
+    }
+  } finally {
+    suppressWrite = false;
+    writeParams();
+    showUrlErrors(errors);
+  }
 }
+
+restoreFromUrl();
 </script>
 </body>
 </html>
