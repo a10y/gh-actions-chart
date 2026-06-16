@@ -211,10 +211,24 @@ function writeParams() {
   }
 }
 
+// Ensure a select can hold `val` even if it's not among the loaded runs, so a
+// shared link's filter is faithfully restored (and not silently dropped).
+function ensureOption(sel, val) {
+  if (!val) return;
+  if (![...sel.options].some(o => o.value === val)) {
+    const o = document.createElement('option');
+    o.value = val;
+    o.textContent = `${val} (not in loaded runs)`;
+    sel.appendChild(o);
+  }
+}
+
 function applyFilterParams(s) {
   if (!s) return;
-  if (s.branch && [...els.fBranch.options].some(o => o.value === s.branch)) els.fBranch.value = s.branch;
-  if (s.event && [...els.fEvent.options].some(o => o.value === s.event)) els.fEvent.value = s.event;
+  ensureOption(els.fBranch, s.branch);
+  ensureOption(els.fEvent, s.event);
+  if (s.branch) els.fBranch.value = s.branch;
+  if (s.event) els.fEvent.value = s.event;
   if (s.conclusion) els.fStatus.value = s.conclusion;
 }
 
