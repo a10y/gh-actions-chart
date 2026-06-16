@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GitHub Actions Run Frequency</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #656d76;
+    --border: #d0d7de;
+    --accent: #0969da;
+    --queue: #afb8c1;
+    --success: #2da44e;
+    --failure: #cf222e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 16px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); font-weight: 600; }
+  input, select, button {
+    font: inherit;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--fg);
+  }
+  input { min-width: 200px; }
+  input[type="password"] { min-width: 260px; }
+  input[type="number"] { min-width: 90px; }
+  select { min-width: 160px; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  button.secondary { background: #f6f8fa; color: var(--fg); border-color: var(--border); }
+  .filters { border-top: 1px solid var(--border); padding-top: 16px; }
+  .legend { display: flex; gap: 18px; align-items: center; margin: 8px 0 12px; font-size: 13px; color: var(--muted); }
+  .legend .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  #status { margin: 10px 0; font-size: 13px; min-height: 18px; }
+  #status.error { color: var(--failure); }
+  #status.ok { color: var(--success); }
+  .chart-wrap { position: relative; height: 460px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  a { color: var(--accent); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GitHub Actions Run Frequency</h1>
+  <div class="sub">Stacked bars show queue time + run time per check run. Color marks success / failure. Click a bar to open the run.</div>
+</header>
+
+<main>
+  <div class="row">
+    <div class="field">
+      <label for="repo">Repository (owner/repo)</label>
+      <input id="repo" placeholder="octocat/Hello-World" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="pat">GitHub PAT (optional, stored locally)</label>
+      <input id="pat" type="password" placeholder="ghp_… for private repos / higher limits" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="loadWfBtn" class="secondary">Load checks ▸</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label for="wfSelect">Check / workflow to chart</label>
+      <select id="wfSelect" disabled><option value="">Load checks first…</option></select>
+    </div>
+    <div class="field">
+      <label for="maxRuns">Max runs of this check</label>
+      <input id="maxRuns" type="number" min="1" max="3000" step="100" value="300" />
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="fetchBtn" disabled>Fetch runs</button>
+    </div>
+  </div>
+
+  <div class="row filters">
+    <div class="field">
+      <label for="fBranch">Branch</label>
+      <select id="fBranch"><option value="">All</option></select>
+    </div>
+    <div class="field">
+      <label for="fEvent">Trigger (PR / push / …)</label>
+      <select id="fEvent"><option value="">All</option></select>
+    </div>
+    <div class="field">
+      <label for="fStatus">Conclusion</label>
+      <select id="fStatus">
+        <option value="">All</option>
+        <option value="success">Success</option>
+        <option value="failure">Failure</option>
+        <option value="other">Other</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="status"></div>
+
+  <div class="legend">
+    <span><span class="swatch" style="background:var(--queue)"></span>Queue time</span>
+    <span><span class="swatch" style="background:var(--success)"></span>Run time (success)</span>
+    <span><span class="swatch" style="background:var(--failure)"></span>Run time (failure)</span>
+    <span><span class="swatch" style="background:#bf8700"></span>Run time (other)</span>
+  </div>
+
+  <div class="chart-wrap">
+    <canvas id="chart"></canvas>
+  </div>
+  <div class="hint">Tip: click any bar (or anywhere along its time column) to jump to the exact Actions run on GitHub.</div>
+
+  <details>
+    <summary>How durations are computed</summary>
+    <div class="hint">
+      Queue time = <code>run_started_at − created_at</code>. Run time = <code>updated_at − run_started_at</code>
+      (the workflow run's last update, ≈ completion). Only completed runs have meaningful values.
+    </div>
+  </details>
+</main>
+
+<script>
+const COLORS = {
+  queue: '#afb8c1',
+  success: '#2da44e',
+  failure: '#cf222e',
+  cancelled: '#8c959f',
+  timed_out: '#cf222e',
+  skipped: '#8c959f',
+  other: '#bf8700',
+};
+
+const els = {
+  repo: document.getElementById('repo'),
+  pat: document.getElementById('pat'),
+  maxRuns: document.getElementById('maxRuns'),
+  loadWfBtn: document.getElementById('loadWfBtn'),
+  wfSelect: document.getElementById('wfSelect'),
+  fetchBtn: document.getElementById('fetchBtn'),
+  fBranch: document.getElementById('fBranch'),
+  fEvent: document.getElementById('fEvent'),
+  fStatus: document.getElementById('fStatus'),
+  status: document.getElementById('status'),
+};
+
+let allRuns = [];   // normalized run objects
+let workflows = []; // preflighted workflow list
+let chart = null;
+
+// ---- persistence ----
+els.repo.value = localStorage.getItem('gac_repo') || '';
+els.pat.value = localStorage.getItem('gac_pat') || '';
+els.maxRuns.value = localStorage.getItem('gac_max') || '300';
+els.repo.addEventListener('change', () => localStorage.setItem('gac_repo', els.repo.value.trim()));
+els.pat.addEventListener('change', () => localStorage.setItem('gac_pat', els.pat.value.trim()));
+els.maxRuns.addEventListener('change', () => localStorage.setItem('gac_max', els.maxRuns.value));
+
+function setStatus(msg, kind) {
+  els.status.textContent = msg;
+  els.status.className = kind || '';
+}
+
+function runColor(conclusion) {
+  if (conclusion === 'success') return COLORS.success;
+  if (conclusion === 'failure') return COLORS.failure;
+  if (conclusion in COLORS) return COLORS[conclusion];
+  return COLORS.other;
+}
+
+function secondsBetween(a, b) {
+  if (!a || !b) return 0;
+  const s = (new Date(b) - new Date(a)) / 1000;
+  return s > 0 ? s : 0;
+}
+
+function fmtDur(s) {
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60), r = Math.round(s % 60);
+  if (m < 60) return `${m}m ${r}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+// ---- shared helpers ----
+function repoSlug() {
+  return els.repo.value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
+}
+
+function ghHeaders() {
+  const pat = els.pat.value.trim();
+  const h = { 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  if (pat) h['Authorization'] = `Bearer ${pat}`;
+  return h;
+}
+
+async function ghError(res) {
+  const remaining = res.headers.get('x-ratelimit-remaining');
+  let detail = '';
+  try { detail = (await res.json()).message || ''; } catch (_) {}
+  if (res.status === 401) return new Error('401 Unauthorized — check your PAT.');
+  if (res.status === 403 && remaining === '0') return new Error('Rate limit exceeded — add a PAT to raise the limit.');
+  if (res.status === 404) return new Error('404 Not Found — repo missing or PAT lacks access.');
+  return new Error(`GitHub API error ${res.status}: ${detail}`);
+}
+
+// ---- preflight: list the repo's checks/workflows ----
+async function loadWorkflows() {
+  const repo = repoSlug();
+  if (!/^[^/]+\/[^/]+$/.test(repo)) { setStatus('Enter a repository as owner/repo.', 'error'); return; }
+  localStorage.setItem('gac_repo', repo);
+  localStorage.setItem('gac_pat', els.pat.value.trim());
+
+  els.loadWfBtn.disabled = true;
+  setStatus('Loading checks…');
+  try {
+    workflows = [];
+    for (let page = 1; ; page++) {
+      const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows?per_page=100&page=${page}`, { headers: ghHeaders() });
+      if (!res.ok) throw await ghError(res);
+      const data = await res.json();
+      const wf = data.workflows || [];
+      workflows.push(...wf);
+      if (wf.length < 100) break;
+    }
+  } catch (e) {
+    setStatus(e.message, 'error');
+    els.loadWfBtn.disabled = false;
+    return;
+  }
+
+  workflows.sort((a, b) => a.name.localeCompare(b.name));
+  els.wfSelect.innerHTML = '<option value="">All workflows</option>';
+  workflows.forEach(w => {
+    const o = document.createElement('option');
+    o.value = String(w.id);
+    o.textContent = w.state === 'active' ? w.name : `${w.name} (${w.state})`;
+    els.wfSelect.appendChild(o);
+  });
+  els.wfSelect.disabled = false;
+  els.fetchBtn.disabled = false;
+  els.loadWfBtn.disabled = false;
+  setStatus(`Found ${workflows.length} checks. Pick one and fetch its runs.`, 'ok');
+}
+
+// ---- fetch runs for the selected check ----
+async function fetchRuns() {
+  const repo = repoSlug();
+  if (!/^[^/]+\/[^/]+$/.test(repo)) { setStatus('Enter a repository as owner/repo.', 'error'); return; }
+  const maxRuns = Math.max(1, parseInt(els.maxRuns.value, 10) || 300);
+  localStorage.setItem('gac_repo', repo);
+  localStorage.setItem('gac_pat', els.pat.value.trim());
+  localStorage.setItem('gac_max', String(maxRuns));
+
+  const wfId = els.wfSelect.value;
+  const base = wfId
+    ? `https://api.github.com/repos/${repo}/actions/workflows/${wfId}/runs`
+    : `https://api.github.com/repos/${repo}/actions/runs`;
+  const wfLabel = wfId ? (workflows.find(w => String(w.id) === wfId)?.name || 'check') : 'all workflows';
+
+  els.fetchBtn.disabled = true;
+  const perPage = 100;
+  const collected = [];
+  try {
+    for (let page = 1; collected.length < maxRuns; page++) {
+      setStatus(`Fetching “${wfLabel}”: page ${page}… (${collected.length} runs)`);
+      const res = await fetch(`${base}?per_page=${perPage}&page=${page}`, { headers: ghHeaders() });
+      if (!res.ok) throw await ghError(res);
+      const data = await res.json();
+      const runs = data.workflow_runs || [];
+      if (runs.length === 0) break;
+      collected.push(...runs);
+      if (runs.length < perPage) break;
+    }
+  } catch (e) {
+    setStatus(e.message, 'error');
+    els.fetchBtn.disabled = false;
+    return;
+  }
+
+  allRuns = collected.slice(0, maxRuns).map(r => ({
+    id: r.id,
+    name: r.name || `(workflow ${r.workflow_id})`,
+    branch: r.head_branch || '(none)',
+    event: r.event || '(unknown)',
+    conclusion: r.conclusion || r.status || 'unknown',
+    created_at: r.created_at,
+    run_started_at: r.run_started_at || r.created_at,
+    updated_at: r.updated_at,
+    html_url: r.html_url,
+    display_title: r.display_title || r.name,
+    run_number: r.run_number,
+  }));
+
+  els.fetchBtn.disabled = false;
+  const ds = allRuns.map(r => new Date(r.created_at)).filter(d => !isNaN(d));
+  let range = '';
+  if (ds.length) {
+    const min = new Date(Math.min(...ds)), max = new Date(Math.max(...ds));
+    range = ` spanning ${min.toLocaleDateString()} → ${max.toLocaleDateString()}`;
+  }
+  setStatus(`Loaded ${allRuns.length} runs of “${wfLabel}”${range}.`, 'ok');
+  populateFilters();
+  render();
+}
+
+function populateFilters() {
+  const fill = (sel, values) => {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">All</option>';
+    [...values].sort().forEach(v => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = v;
+      sel.appendChild(o);
+    });
+    if ([...values].includes(cur)) sel.value = cur;
+  };
+  fill(els.fBranch, new Set(allRuns.map(r => r.branch)));
+  fill(els.fEvent, new Set(allRuns.map(r => r.event)));
+}
+
+function filtered() {
+  const b = els.fBranch.value, ev = els.fEvent.value, st = els.fStatus.value;
+  return allRuns.filter(r => {
+    if (b && r.branch !== b) return false;
+    if (ev && r.event !== ev) return false;
+    if (st === 'success' && r.conclusion !== 'success') return false;
+    if (st === 'failure' && r.conclusion !== 'failure') return false;
+    if (st === 'other' && (r.conclusion === 'success' || r.conclusion === 'failure')) return false;
+    return true;
+  });
+}
+
+// ---- render ----
+function render() {
+  const rows = filtered().slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+  const queueData = rows.map(r => ({ x: new Date(r.created_at).getTime(), y: secondsBetween(r.created_at, r.run_started_at) }));
+  const runData = rows.map(r => ({ x: new Date(r.created_at).getTime(), y: secondsBetween(r.run_started_at, r.updated_at) }));
+  const runColors = rows.map(r => runColor(r.conclusion));
+
+  const data = {
+    datasets: [
+      {
+        label: 'Queue time',
+        data: queueData,
+        backgroundColor: COLORS.queue,
+        stack: 'dur',
+        barPercentage: 0.95,
+        categoryPercentage: 0.9,
+        maxBarThickness: 48,
+      },
+      {
+        label: 'Run time',
+        data: runData,
+        backgroundColor: runColors,
+        stack: 'dur',
+        barPercentage: 0.95,
+        categoryPercentage: 0.9,
+        maxBarThickness: 48,
+      },
+    ],
+  };
+
+  const opts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    onClick: (evt) => {
+      const idx = nearestIndex(evt);
+      if (idx != null && rows[idx]) window.open(rows[idx].html_url, '_blank');
+    },
+    onHover: (evt, active) => {
+      evt.native.target.style.cursor = nearestIndex(evt) != null ? 'pointer' : 'default';
+    },
+    scales: {
+      x: {
+        type: 'timeseries',
+        stacked: true,
+        offset: true,
+        time: { tooltipFormat: 'PPpp' },
+        ticks: { autoSkip: true, maxRotation: 60, minRotation: 0 },
+        title: { display: true, text: 'Run time (queued at)' },
+      },
+      y: {
+        stacked: true,
+        beginAtZero: true,
+        title: { display: true, text: 'Duration' },
+        ticks: { callback: (v) => fmtDur(v) },
+      },
+    },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          title: (items) => {
+            const r = rows[items[0].dataIndex];
+            return `${r.name} #${r.run_number}`;
+          },
+          label: (item) => {
+            const r = rows[item.dataIndex];
+            const isQueue = item.datasetIndex === 0;
+            return isQueue
+              ? `Queue: ${fmtDur(item.parsed.y)}`
+              : `Run: ${fmtDur(item.parsed.y)} · ${r.conclusion}`;
+          },
+          afterBody: (items) => {
+            const r = rows[items[0].dataIndex];
+            return [`branch: ${r.branch}`, `trigger: ${r.event}`, 'click to open run'];
+          },
+        },
+      },
+    },
+  };
+
+  // store rows on the helper for click mapping
+  render._rows = rows;
+
+  if (chart) {
+    chart.data = data;
+    chart.options = opts;
+    chart.update();
+  } else {
+    chart = new Chart(document.getElementById('chart'), { type: 'bar', data, options: opts });
+  }
+
+  const total = allRuns.length;
+  if (total && rows.length !== total) {
+    setStatus(rows.length === 0
+      ? `0 of ${total} loaded runs match the current filters — try resetting Trigger / Conclusion to All.`
+      : `Showing ${rows.length} of ${total} loaded runs (filters active).`,
+      rows.length === 0 ? 'error' : '');
+  }
+}
+
+// Find the bar nearest the click/hover, even when clicking the axis/empty column.
+function nearestIndex(evt) {
+  if (!chart) return null;
+  const hit = chart.getElementsAtEventForMode(evt, 'index', { intersect: true }, false);
+  if (hit.length) return hit[0].index;
+  // fallback: nearest by x pixel (lets axis ticks / columns be clickable)
+  const rows = render._rows || [];
+  if (!rows.length) return null;
+  const x = evt.x ?? (evt.native && evt.native.offsetX);
+  if (x == null) return null;
+  const scale = chart.scales.x;
+  if (x < scale.left - 20 || x > scale.right + 20) return null;
+  let best = null, bestD = Infinity;
+  rows.forEach((r, i) => {
+    const px = scale.getPixelForValue(new Date(r.created_at).getTime());
+    const d = Math.abs(px - x);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return bestD <= 24 ? best : null;
+}
+
+els.loadWfBtn.addEventListener('click', loadWorkflows);
+els.fetchBtn.addEventListener('click', fetchRuns);
+els.wfSelect.addEventListener('change', () => { if (els.wfSelect.value !== undefined) fetchRuns(); });
+[els.fBranch, els.fEvent, els.fStatus].forEach(s => s.addEventListener('change', render));
+els.repo.addEventListener('keydown', e => { if (e.key === 'Enter') loadWorkflows(); });
+</script>
+</body>
+</html>
